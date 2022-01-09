@@ -1,0 +1,145 @@
+---
+title: "Predicting Covid Vaccination Rates"
+author: "Edbert Jao"
+date: "12/20/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load required libraries
+
+```{r}
+library(fredr);
+library(vars);
+library(urca);
+library(tidyverse);
+library(aTSA);
+library(tsDyn);
+library(lmtest);
+library(xts);
+library(lubridate);
+```
+
+## Load data
+
+```{r}
+setwd("C:\\Users\\edber\\OneDrive\\Desktop\\Road to PHD\\Fall 2021 @ Tufts\\Applications of Econometrics\\Final Project\\Predicting");
+covid_df = read.csv("owid-covid-data.csv");
+```
+
+## Initial Data Cleaning
+```{r}
+covid_df %>% str();
+covid_df = covid_df %>% dplyr::filter(iso_code == "USA");
+
+df = select(covid_df, date, people_fully_vaccinated_per_hundred, new_vaccinations_smoothed, new_deaths_per_million);
+df %>% str();
+
+date = df$date[328:(length(df$people_fully_vaccinated_per_hundred))] %>% ts();
+vacc_rate = df$people_fully_vaccinated_per_hundred[328:(length(df$people_fully_vaccinated_per_hundred))] %>% ts();
+ln_newvacc = log(df$new_vaccinations_smoothed)[328:(length(df$people_fully_vaccinated_per_hundred))] %>% ts();
+new_deaths_per_million = df$new_deaths_per_million[328:(length(df$people_fully_vaccinated_per_hundred))] %>% ts();
+dft_reference = cbind(vacc_rate, new_deaths_per_million, ln_newvacc) %>% as.data.frame(); # creating a dataframe to reference for in-sample predictions
+```
+
+
+### Stage 1: Predicting in-sample for the past 30 days, using all days for which data is available from 31 days ago and prior.
+Start by specifying the model. The 30 most recent days' data are removed. They will be predicted for. Comparing the predicted values and the in-sample values will show the model's effectiveness.
+```{r}
+vacc_rate = df$people_fully_vaccinated_per_hundred[328:(length(df$people_fully_vaccinated_per_hundred)-30)] %>% ts();
+ln_newvacc = log(df$new_vaccinations_smoothed)[328:(length(df$people_fully_vaccinated_per_hundred)-30)] %>% ts();
+new_deaths_per_million = df$new_deaths_per_million[328:(length(df$people_fully_vaccinated_per_hundred)-30)] %>% ts();
+dft = cbind(vacc_rate, new_deaths_per_million, ln_newvacc) %>% as.data.frame();
+
+grangertest(ln_newvacc~vacc_rate);             # ln_newvacc granger-causes vacc_rate
+grangertest(new_deaths_per_million~vacc_rate); # new_deaths_per_million granger-causes vacc_rate
+
+tseries::adf.test(vacc_rate);                  #stationary
+tseries::adf.test(ln_newvacc);                 #non-stationary
+tseries::adf.test(new_deaths_per_million);     #non-stationary
+
+cbind(vacc_rate, new_deaths_per_million, ln_newvacc) %>% autoplot() + xlab("Days since 2020-12-14");
+
+lagselect = VARselect(dft);
+lagselect;                                     # AIC recommends 10 lags
+
+ctest1e = ca.jo(dft, type = "eigen", K = 10);  # Johansen procedure: testing for and estimating cointegrating systems
+ctest1e %>% summary();                         # strong evidence for 2 cointegrating relationship: VECM is viable
+                                               # all eigenvalues lie within the unit circle
+```
+
+## Diagnostic tests and plots for the model.
+```{r}
+vecm1 = VECM(dft, 10, r = 2, estim = "ML");
+vecm1 %>% summary();
+
+model1var <- vec2var(ctest1e, r = 2);
+serial.test(model1var, type = "BG");           # strong evidence of serial correlation 
+vars::arch.test(model1var);                    # strong evidence of heteroskedastic residuals
+normality.test(model1var);                     # strong evidence residuals are not normally distributed
+
+plot(irf(model1var, impulse = "new_deaths_per_million", response = "vacc_rate", n.ahead = 30, boot = TRUE));
+plot(irf(model1var, impulse = "ln_newvacc", response = "vacc_rate", n.ahead = 30, boot = TRUE));
+
+plot(fevd(model1var));
+```
+
+## Forecast the last 30 days vaccination rate using the model. Then calculate in sample Mean Squared Prediction Error
+```{r}
+forecast1 <- predict(model1var, n.ahead = 30, ci = 0.95);
+fanchart(forecast1, names = "vacc_rate", main = "Fanchart for Vaccination Rate", xlab = "Days since 2020-12-14", ylab = "vacc_rate");  
+forecast1$fcst$vacc_rate[,1];
+
+in_sampleMSPE = (1/30) * sum((forecast1$fcst$vacc_rate[,1]%>%as.matrix()) - (dft_reference$vacc_rate[343:372]%>%as.matrix()))^2;
+in_sampleMSPE;
+```
+
+### Stage 2: Predicting out-of-sample, for the next 30 days. Diagnostic tests return the same conclusions even after returning 30 days to the sample.
+
+```{r}
+vacc_rate2 = df$people_fully_vaccinated_per_hundred[328:(length(df$people_fully_vaccinated_per_hundred))] %>% ts();
+ln_newvacc2 = log(df$new_vaccinations_smoothed)[328:(length(df$people_fully_vaccinated_per_hundred))] %>% ts();
+new_deaths_per_million2 = df$new_deaths_per_million[328:(length(df$people_fully_vaccinated_per_hundred))] %>% ts();
+dft2 = cbind(vacc_rate2, new_deaths_per_million2, ln_newvacc2) %>% as.data.frame();
+
+grangertest(ln_newvacc2~vacc_rate2);             # ln_newvacc granger-causes vacc_rate
+grangertest(new_deaths_per_million2~vacc_rate2); # new_deaths_per_million granger-causes vacc_rate
+
+tseries::adf.test(vacc_rate2);                  #stationary
+tseries::adf.test(ln_newvacc2);                 #non-stationary
+tseries::adf.test(new_deaths_per_million2);     #non-stationary
+lagselect2 = VARselect(dft2);
+lagselect2;                                     # AIC recommends 10 lags
+
+ctest2e = ca.jo(dft2, type = "eigen", K = 10);  # Johansen procedure: testing for and estimating cointegrating systems
+ctest2e %>% summary();                          # strong evidence for 2 cointegrating relationship: VECM is viable
+                                                # all eigenvalues lie within the unit circle
+
+vecm2 = VECM(dft2, 10, r = 2, estim = "ML");
+vecm2 %>% summary();
+
+model2var <- vec2var(ctest2e, r = 2);
+serial.test(model2var, type = "BG");           # strong evidence of serial correlation 
+vars::arch.test(model2var);                    # strong evidence of heteroskedastic residuals
+normality.test(model2var);                     # strong evidence residuals are not normally distributed
+
+```
+### Stage 2 Diagnostic Plots highly resemble Stage 1 Diagnostic Plots
+```{r}
+plot(irf(model2var, impulse = "new_deaths_per_million2", response = "vacc_rate2", n.ahead = 30, boot = TRUE));
+plot(irf(model2var, impulse = "ln_newvacc2", response = "vacc_rate2", n.ahead = 30, boot = TRUE));
+
+plot(fevd(model2var));
+```
+
+## Forecast vaccination rate for the next 30 days.
+```{r}
+forecast2 <- predict(model2var, n.ahead = 30, ci = 0.95);
+fanchart(forecast2, names = "vacc_rate2", main = "Fanchart for Vaccination Rate", xlab = "Days since 2020-12-14", ylab = "vacc_rate");
+
+forecast2$fcst$vacc_rate2[,1];
+```
+
